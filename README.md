@@ -17,6 +17,7 @@ Turn a jailbroken Kindle into an always-on now-playing display and remote contro
 - Lock turns the dock into a display only, so a brush against the screen does nothing; hold anywhere to unlock
 - Shows where you are in the queue or album ("3 of 12") when the app reports it
 - Runs as a KOReader plugin: open it from Tools > More tools > Now Playing, or bind a gesture (e.g. swipe right along the top edge) to open it anywhere
+- With the [Bookshelf](https://github.com/AndyHazz/bookshelf.koplugin) home screen: a Now playing card for its start menu or home grid shows the current track and progress, and a tap opens the dock (see below)
 - Zero-touch: the Mac daemon starts at login (launchd), KOReader starts at boot on the Kindle, and the two reconnect on their own over your LAN or Tailscale
 - The Kindle never sleeps while docked, so it's always reachable and always showing the current track
 
@@ -41,6 +42,14 @@ The daemon bears a token (auto-generated on first run, `~/.config/kindledock/con
 ## Setup
 
 The full end-to-end setup - written so a coding agent can do it for you - is in [AGENTS.md](AGENTS.md).
+
+## Bookshelf card
+
+If you use the Bookshelf home screen, copy `koreader/bookshelf-module/now_playing.lua` to
+`/mnt/us/koreader/settings/bookshelf/micromodules/` on the Kindle and restart KOReader. Then
+long-press any start-menu item, tap **+**, pick **Bookshelf micro-module... > Now playing**, and move
+it to the top. It reuses the dock plugin's host, port and token, refreshes once a minute, and opens
+the full dock on tap.
 
 ## Docs
 
