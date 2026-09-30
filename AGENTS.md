@@ -36,7 +36,7 @@ Bind a gesture to open the dock from anywhere:
 
 ## Step 4 - Theme
 
-The dock defaults to a dark (true-black) theme. Tap Theme on the dock to cycle Dark, Light, and Auto (dark from 19:00 to 07:00). The choice is saved as `["theme"]` in `/mnt/us/koreader/settings/kindledock.lua`.
+The dock defaults to a dark (true-black) theme. For light, or auto (dark from 19:00 to 07:00), add `["theme"] = "light",` or `["theme"] = "auto",` to `/mnt/us/koreader/settings/kindledock.lua` and restart KOReader.
 
 ## Step 5 - Dock behavior
 

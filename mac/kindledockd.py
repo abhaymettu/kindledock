@@ -14,6 +14,9 @@ Endpoints:
   POST /cmd?c=set_volume&v=0-100 | volume_up | volume_down
   GET  /outputs                     auth - {"outputs": [{"uid", "name", "current"}]}
   POST /cmd?c=set_output&uid=<uid> switch the Mac's sound output
+  POST /cmd?c=shuffle | repeat      Apple Music / Spotify (Music repeat cycles off, all, one)
+  GET  /queue                       auth - Apple Music current playlist from the playing track
+  POST /cmd?c=play_index&i=<n>      play track n of Apple Music's current playlist
 
 Config: ~/.config/kindledock/config.json {"port": 8931, "token": "<auto>"}
 """
@@ -161,7 +164,8 @@ def nowplaying():
         "app": j.get("bundleIdentifier"), "media_type": j.get("mediaType"),
         "volume": get_volume(), "output": current_output(),
         "has_artwork": bool(j.get("artworkData")) or (j.get("bundleIdentifier") in BROWSERS),
-        "track_id": track_id, "queue": queue, "server_time": round(time.time(), 1),
+        "track_id": track_id, "queue": queue,
+        "modes": app_modes(j.get("bundleIdentifier")), "server_time": round(time.time(), 1),
     }
 
 
@@ -260,6 +264,43 @@ def artwork_png(track_id):
             with open(marker, "w") as f: f.write(track_id)
         with open(png, "rb") as f: return f.read()
 
+# Shuffle/repeat state and the playlist queue come from the apps' AppleScript
+# dictionaries; media-control can toggle them but cannot report their state.
+MUSIC, SPOTIFY = "com.apple.Music", "com.spotify.client"
+
+def app_modes(app):
+    """{"shuffle": bool, "repeat": "off"|"one"|"all"} for Music/Spotify, else None."""
+    if app == MUSIC:
+        rc, out, _ = osa('tell application "Music" to return (shuffle enabled as text) & " " & (song repeat as text)')
+    elif app == SPOTIFY:
+        rc, out, _ = osa('tell application "Spotify" to return (shuffling as text) & " " & (repeating as text)')
+    else:
+        return None
+    parts = out.split()
+    if rc != 0 or len(parts) != 2: return None
+    return {"shuffle": parts[0] == "true", "repeat": {"true": "all", "false": "off"}.get(parts[1], parts[1])}
+
+MUSIC_QUEUE_SCRIPT = """tell application "Music"
+set p to current playlist
+set i to index of current track
+set ns to name of tracks of p
+set ar to artist of tracks of p
+set AppleScript's text item delimiters to (ASCII character 31)
+return (name of p) & (ASCII character 30) & i & (ASCII character 30) & (ns as text) & (ASCII character 30) & (ar as text)
+end tell"""
+
+def music_queue(limit=300):
+    """Apple Music's current playlist, starting at the playing track. Up Next
+    additions and the shuffled order are not scriptable, so this is playlist order."""
+    rc, out, _ = osa(MUSIC_QUEUE_SCRIPT, timeout=20)
+    f = out.split("\x1e")
+    if rc != 0 or len(f) != 4: return None
+    cur = int(f[1])
+    tracks = [{"index": n + 1, "title": t, "artist": a}
+              for n, (t, a) in enumerate(zip(f[2].split("\x1f"), f[3].split("\x1f")))]
+    tracks = tracks[cur - 1:] + tracks[:cur - 1]  # playing track first, then wrap around
+    return {"playlist": f[0], "current": cur, "tracks": tracks[:limit]}
+
 MC_COMMANDS = {
     "toggle": ["toggle-play-pause"], "play": ["play"], "pause": ["pause"],
     "next": ["next-track"], "prev": ["previous-track"],
@@ -292,6 +333,22 @@ def run_command(qs):
         v = max(0, min(100, cur + (5 if c == "volume_up" else -5)))
         rc, _, err = osa(f"set volume output volume {v}")
         return {"ok": rc == 0, "err": err[:200] if rc else "", "volume": v}
+    if c in ("shuffle", "repeat"):
+        app, modes = LAST_APP[0], app_modes(LAST_APP[0])
+        if not modes: return {"ok": False, "err": "not supported for this app"}
+        if app == MUSIC:
+            script = ("set shuffle enabled to %s" % str(not modes["shuffle"]).lower() if c == "shuffle" else
+                      "set song repeat to %s" % {"off": "all", "all": "one"}.get(modes["repeat"], "off"))
+        else:
+            script = "set shuffling to not shuffling" if c == "shuffle" else "set repeating to not repeating"
+        rc, _, err = osa('tell application "%s" to %s' % ("Music" if app == MUSIC else "Spotify", script))
+        return {"ok": rc == 0, "err": err[:200] if rc else ""}
+    if c == "play_index":
+        try: i = int(qs.get("i", [""])[0])
+        except ValueError: return {"ok": False, "err": "bad index"}
+        if LAST_APP[0] != MUSIC: return {"ok": False, "err": "queue is Apple Music only"}
+        rc, _, err = osa('tell application "Music" to play track %d of current playlist' % i)
+        return {"ok": rc == 0, "err": err[:200] if rc else ""}
     if c == "set_output":
         ok, err = set_output(qs.get("uid", [""])[0])
         return {"ok": ok, "err": err}
@@ -321,6 +378,9 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": False, "err": "auth"}, 403)
         if u.path == "/nowplaying":
             return self._json(nowplaying())
+        if u.path == "/queue":
+            q = music_queue() if LAST_APP[0] == MUSIC else None
+            return self._json(q or {"ok": False, "err": "no queue"}, 200 if q else 404)
         if u.path == "/outputs":
             return self._json({"outputs": list_outputs()})
         if u.path == "/artwork.png":

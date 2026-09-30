@@ -8,12 +8,14 @@ Turn a jailbroken Kindle into an always-on now-playing display and remote contro
 
 - Controls whatever your Mac is playing - Apple Music, Spotify, YouTube, Netflix, anything the macOS now-playing system can see
 - Shows it on a clean e-ink UI that looks native to the device: track, artist, and art (square album covers for music, 16:9 thumbnails for video)
-- Dark, light, and auto themes (auto is dark from 7pm to 7am); tap Theme on the dock to cycle them. Flat text controls, hairline progress - no phone UI glued onto e-ink
+- Flat icon controls, hairline progress, true-black by default - no phone UI glued onto e-ink. Light and auto (dark from 7pm to 7am) themes are a one-line setting
 - Controls playback from the Kindle: play/pause, next/previous, ±15s, volume, and tap anywhere on the progress bar to seek
+- Shuffle and repeat for Apple Music and Spotify, showing their real on/off state (Apple Music repeat cycles off, all, one)
+- Queue for Apple Music: browse the playing playlist or album from the current song on, and tap any track to play it. macOS does not let scripts read Up Next or the shuffled order, so the list is in playlist order; Spotify's queue is not reachable at all without its Web API
 - Switches the Mac's sound output from the Kindle: tap the output line to move audio between speakers, headphones, AirPods, or any other output device (AirPlay targets such as TVs are not listed; macOS does not expose them as audio devices)
 - Shows a large clock when nothing is playing, so an idle dock is still useful
 - Lock turns the dock into a display only, so a brush against the screen does nothing; hold anywhere to unlock
-- Shows where you are in the queue or album ("APPLE MUSIC · 3 OF 12") when the app reports it
+- Shows where you are in the queue or album ("3 of 12") when the app reports it
 - Runs as a KOReader plugin: open it from Tools > More tools > Now Playing, or bind a gesture (e.g. swipe right along the top edge) to open it anywhere
 - Zero-touch: the Mac daemon starts at login (launchd), KOReader starts at boot on the Kindle, and the two reconnect on their own over your LAN or Tailscale
 - The Kindle never sleeps while docked, so it's always reachable and always showing the current track

@@ -8,7 +8,6 @@ system-wide (Music, browser video, ...), not just one app.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
-local Button = require("ui/widget/button")
 local ButtonDialog = require("ui/widget/buttondialog")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local DataStorage = require("datastorage")
@@ -22,6 +21,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local ImageWidget = require("ui/widget/imagewidget")
 local LuaSettings = require("luasettings")
+local Menu = require("ui/widget/menu")
 local logger = require("logger")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local ProgressWidget = require("ui/widget/progresswidget")
@@ -62,9 +62,8 @@ function KindleDock:onDispatcherRegisterActions()
 end
 
 
--- theme: "dark" (default), "light", or "auto" (dark from 19:00 to 07:00)
-local THEMES = { dark = "light", light = "auto", auto = "dark" }
-local THEME_LABELS = { dark = _("Dark"), light = _("Light"), auto = _("Auto") }
+-- theme setting: "dark" (default), "light", or "auto" (dark from 19:00 to 07:00)
+local THEMES = { dark = true, light = true, auto = true }
 
 function KindleDock:theme()
     local t = self.settings:readSetting("theme") or "dark"
@@ -78,12 +77,6 @@ function KindleDock:isDark()
         return h >= 19 or h < 7
     end
     return t == "dark"
-end
-
-function KindleDock:cycleTheme()
-    self.settings:saveSetting("theme", THEMES[self:theme()])
-    self.settings:flush()
-    self:refreshScreen()  -- goes full on its own when the effective theme flips
 end
 
 function KindleDock:setLocked(locked)
@@ -238,6 +231,37 @@ function KindleDock:showOutputs()
     UIManager:show(self.output_dialog)
 end
 
+-- Apple Music's current playlist, starting at the playing track; tap one to play it
+function KindleDock:showQueue()
+    local raw, code = self:request("GET", "/queue")
+    local ok, q = pcall(json.decode, raw or "")
+    if code ~= 200 or not ok or type(q) ~= "table" or type(q.tracks) ~= "table" then return end
+    local items = {}
+    for _, t in ipairs(q.tracks) do
+        table.insert(items, {
+            text = t.title,
+            mandatory = t.artist,
+            bold = t.index == q.current,
+            callback = function()
+                UIManager:close(self.queue_menu)
+                self:sendCommand("c=play_index&i=" .. tostring(t.index))
+            end,
+        })
+    end
+    local modes = self.state and type(self.state.modes) == "table" and self.state.modes
+    self.queue_menu = Menu:new{
+        title = q.playlist .. ((modes and modes.shuffle) and "  ·  " .. _("shuffle on") or ""),
+        item_table = items,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        close_callback = function() UIManager:close(self.queue_menu) end,
+    }
+    UIManager:show(self.queue_menu)
+end
+
 -- cmd is a /cmd query string, or a function for buttons that open a dialog instead
 function KindleDock:runCommand(cmd)
     if type(cmd) == "function" then cmd() else self:sendCommand(cmd) end
@@ -256,289 +280,189 @@ local function fmt_time(secs)
     return string.format("%d:%02d", math.floor(secs / 60), secs % 60)
 end
 
-function KindleDock:appLabel(app)
-    local names = {
-        ["com.apple.Music"] = "Apple Music",
-        ["com.spotify.client"] = "Spotify",
-        ["com.google.Chrome"] = "Chrome",
-        ["com.apple.Safari"] = "Safari",
-        ["company.thebrowser.Browser"] = "Arc",
-        ["com.brave.Browser"] = "Brave",
-        ["tv.twitch"] = "Twitch",
-    }
-    return names[app or ""] or app or ""
-end
+local BROWSER_APPS = {
+    ["com.google.Chrome"] = true, ["com.apple.Safari"] = true, ["company.thebrowser.Browser"] = true,
+    ["com.brave.Browser"] = true, ["org.mozilla.firefox"] = true, ["com.microsoft.edgemac"] = true,
+}
+
+-- Font Awesome glyphs from KOReader's bundled nerdfonts/symbols.ttf, which the
+-- UI font falls back to, so they render with the regular "cfont" face
+local ICON = {
+    play = "\u{F04B}", pause = "\u{F04C}", prev = "\u{F048}", next = "\u{F051}",
+    shuffle = "\u{F074}", ["repeat"] = "\u{F01E}", vol_down = "\u{F027}", vol_up = "\u{F028}",
+    output = "\u{F025}", queue = "\u{F0CA}", lock = "\u{F023}",
+}
 
 function KindleDock:buildContent()
     local sw, sh = Screen:getWidth(), Screen:getHeight()
     local state = self.state
-    local v = VerticalGroup:new{ align = "center" }
-    local pad = math.floor(sw * 0.05)
     local dark = self:isDark()
     local C_HI   = dark and Blitbuffer.COLOR_WHITE      or Blitbuffer.COLOR_BLACK
     local C_DIM  = dark and Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_DARK_GRAY
-    local C_FILL = dark and Blitbuffer.COLOR_WHITE      or Blitbuffer.COLOR_BLACK
+    local C_MUTE = Blitbuffer.COLOR_GRAY
     local C_TRK  = dark and Blitbuffer.COLOR_DARK_GRAY  or Blitbuffer.COLOR_LIGHT_GRAY
-
-    local function hspan(w) return HorizontalSpan:new{ width = w } end
-    local function vspan(h) return VerticalSpan:new{ width = h } end
-
-    -- top label
-    local top_text
-    if state and state.app then
-        top_text = string.upper(self:appLabel(state.app))
-        if type(state.queue) == "table" then  -- json null decodes to a sentinel function
-            top_text = top_text .. "  ·  " .. state.queue[1] .. " OF " .. state.queue[2]
-        end
-    elseif self.offline then
-        top_text = "OFFLINE"
-    else
-        top_text = "KINDLE DOCK"
-    end
-    table.insert(v, vspan(math.floor(sh * 0.022)))
-    table.insert(v, TextWidget:new{
-        text = top_text,
-        face = Font:getFace("cfont", 18),
-        fgcolor = Blitbuffer.COLOR_GRAY,
-    })
-    table.insert(v, vspan(math.floor(sh * 0.02)))
-
+    local pad = math.floor(sw * 0.07)
+    local inner_w = sw - 2 * pad
     local playing = state ~= nil and (state.state == "playing" or state.state == "paused")
+    local kd = self
 
-    -- cover art: video (browser) = 16:9, music = square album art
-    local BROWSER_APPS = {
-        ["com.google.Chrome"] = true,
-        ["com.apple.Safari"] = true,
-        ["company.thebrowser.Browser"] = true,
-        ["com.brave.Browser"] = true,
-        ["org.mozilla.firefox"] = true,
-        ["com.microsoft.edgemac"] = true,
-    }
-    local cover_w, cover_h
-    if state and BROWSER_APPS[state.app or ""] then
-        cover_w = math.floor(sw * 0.8)
-        cover_h = math.floor(cover_w * 9 / 16)
-    else
-        cover_w = math.floor(sw * 0.55)
-        cover_h = cover_w
-    end
-    if playing and self.have_art then
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = cover_h },
-            FrameContainer:new{
-                padding = 0,
-                margin = 0,
-                bordersize = dark and Size.border.thin or 0,
-                color = C_DIM,
-                background = Blitbuffer.COLOR_BLACK,
-                ImageWidget:new{
-                    file = self.art_path or ART_PATH,
-                    width = cover_w,
-                    height = cover_h,
-                },
-            },
-        })
-    elseif playing or self.offline then
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = cover_h },
-            TextWidget:new{
-                text = playing and "" or _("Mac unreachable"),
-                face = Font:getFace("cfont", 26),
-                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-            },
-        })
-    else
-        -- idle dock: a clock instead of an empty frame
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = cover_h },
-            TextWidget:new{
-                text = (os.date("%I:%M"):gsub("^0", "")),
-                face = Font:getFace("cfont", 110),
-                fgcolor = C_HI,
-            },
-        })
-    end
-    table.insert(v, vspan(math.floor(sh * 0.012)))
-
-    -- title / artist
-    if playing then
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = math.floor(sh * 0.09) },
-            TextWidget:new{
-                text = state.track or "",
-                face = Font:getFace("cfont", 30),
-                max_width = sw - 2 * pad,
-                bold = true,
-                fgcolor = C_HI,
-            },
-        })
-        local sub = state.artist or ""
-        if state.album and state.album ~= "" then
-            sub = sub .. " - " .. state.album
-        end
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = math.floor(sh * 0.05) },
-            TextWidget:new{
-                text = sub,
-                face = Font:getFace("cfont", 22),
-                max_width = sw - 2 * pad,
-                fgcolor = C_DIM,
-            },
-        })
-    else
-        table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = math.floor(sh * 0.09) },
-            TextWidget:new{
-                text = self.offline and _("Could not reach the Mac") or _("Play something on the Mac"),
-                face = Font:getFace("cfont", 24),
-                fgcolor = C_HI,
-            },
-        })
-    end
-
-    -- progress
-    if playing and (state.duration or 0) > 0 then
-        table.insert(v, vspan(math.floor(sh * 0.014)))
-        local pct = math.min(1, (state.position or 0) / state.duration)
-        -- tap anywhere along the bar to seek; the hit area is taller than the bar
-        local bar_w, bar_h = sw - 2 * pad, math.floor(sh * 0.012)
-        local kd, dur = self, state.duration
-        local bar = InputContainer:new{
-            dimen = Geom:new{ w = bar_w, h = bar_h * 5 },
-            CenterContainer:new{
-                dimen = Geom:new{ w = bar_w, h = bar_h * 5 },
-                ProgressWidget:new{
-                    width = bar_w,
-                    height = bar_h,
-                    percentage = pct,
-                    fillcolor = C_FILL,
-                    bgcolor = C_TRK,
-                },
-            },
+    local function vspan(h) return VerticalSpan:new{ width = h } end
+    local function hspan(w) return HorizontalSpan:new{ width = w } end
+    local function text(t, size, color, opts)
+        opts = opts or {}
+        return TextWidget:new{
+            text = t, face = Font:getFace("cfont", size), fgcolor = color,
+            bold = opts.bold, max_width = opts.max_width,
         }
-        bar.ges_events = {
-            Tap = { GestureRange:new{ ges = "tap", range = function() return bar.dimen end } },
-        }
-        function bar:onTap(_, ges)
-            if kd.locked then return true end
-            local frac = math.max(0, math.min(1, (ges.pos.x - self.dimen.x) / self.dimen.w))
-            kd:sendCommand(string.format("c=seek&to=%.1f", frac * dur))
-            return true
-        end
-        table.insert(v, vspan(-bar_h * 2))
-        table.insert(v, bar)
-        table.insert(v, vspan(-bar_h * 2))
-        table.insert(v, vspan(8))
-        table.insert(v, TextWidget:new{
-            text = fmt_time(state.position) .. "  /  " .. fmt_time(state.duration),
-            face = Font:getFace("cfont", 18),
-            fgcolor = C_DIM,
-        })
     end
-
-    -- controls
-    local btn_w = math.floor((sw - 2 * pad) / 3.4)
-    local btn_h = math.floor(sh * 0.062)
-    local small_w = math.floor((sw - 2 * pad) / 4.6)
-    local small_h = math.floor(sh * 0.05)
-    local function tbtn(label, cmd, enabled, w, h, fsize)
-        local kd = self
+    local function centered(w, h, widget)
+        return CenterContainer:new{ dimen = Geom:new{ w = w, h = h }, widget }
+    end
+    -- flat text/icon button; a disabled one is simply not drawn tappable
+    local function tbtn(label, cmd, w, h, size, color)
         local btn = InputContainer:new{
             dimen = Geom:new{ w = w, h = h },
-            CenterContainer:new{
-                dimen = Geom:new{ w = w, h = h },
-                TextWidget:new{
-                    text = label,
-                    face = Font:getFace("cfont", fsize),
-                    fgcolor = (enabled == false) and Blitbuffer.COLOR_GRAY or C_HI,
-                },
-            },
+            centered(w, h, text(label, size, color)),
         }
         btn.ges_events = {
             Tap = { GestureRange:new{ ges = "tap", range = function() return btn.dimen end } },
         }
-        function btn:onTap()
-            if enabled == false then return true end
-            kd:runCommand(cmd)
-            return true
-        end
+        function btn:onTap() kd:runCommand(cmd) return true end
         return btn
     end
-    local function bigbtn(label, cmd, enabled)
-        if dark then return tbtn(label, cmd, enabled, btn_w, btn_h, 22) end
-        return Button:new{
-            text = label,
-            width = btn_w,
-            height = btn_h,
-            text_font_face = "cfont",
-            text_font_size = 22,
-            enabled = enabled ~= false,
-            callback = function() self:runCommand(cmd) end,
-        }
-    end
-    local function smallbtn(label, cmd, enabled)
-        if dark then return tbtn(label, cmd, enabled, small_w, small_h, 18) end
-        return Button:new{
-            text = label,
-            width = small_w,
-            height = small_h,
-            text_font_face = "cfont",
-            text_font_size = 18,
-            enabled = enabled ~= false,
-            callback = function() self:runCommand(cmd) end,
-        }
-    end
-    if self.locked then
-        -- docked display: no controls, so a brush against the screen does nothing
-        table.insert(v, vspan(math.floor(sh * 0.05)))
-        table.insert(v, TextWidget:new{
-            text = _("Locked  ·  hold anywhere to unlock"),
-            face = Font:getFace("cfont", 16),
-            fgcolor = Blitbuffer.COLOR_GRAY,
+
+    local main = VerticalGroup:new{ align = "center" }
+
+    -- art, or a clock / message in its place
+    local is_video = state and BROWSER_APPS[state.app or ""]
+    local art_w = is_video and math.floor(sw * 0.86) or math.floor(sw * 0.6)
+    local art_h = is_video and math.floor(art_w * 9 / 16) or art_w
+    if playing and self.have_art then
+        table.insert(main, FrameContainer:new{
+            padding = 0, margin = 0,
+            bordersize = dark and Size.border.thin or 0,
+            color = Blitbuffer.COLOR_DARK_GRAY,
+            background = Blitbuffer.COLOR_BLACK,
+            ImageWidget:new{ file = self.art_path or ART_PATH, width = art_w, height = art_h },
         })
-        return v
-    end
-    table.insert(v, vspan(math.floor(sh * 0.02)))
-    table.insert(v, HorizontalGroup:new{ align = "center",
-        bigbtn("<<", "c=prev", playing),
-        hspan(math.floor(pad / 2)),
-        bigbtn(playing and state.state == "playing" and "Pause" or "Play", "c=toggle", state ~= nil),
-        hspan(math.floor(pad / 2)),
-        bigbtn(">>", "c=next", playing),
-    })
-    table.insert(v, vspan(math.floor(sh * 0.012)))
-    local vol = state and state.volume
-    table.insert(v, HorizontalGroup:new{ align = "center",
-        smallbtn("-15s", "c=back15", playing),
-        hspan(math.floor(pad / 3)),
-        smallbtn("Vol -", "c=volume_down", state ~= nil),
-        hspan(math.floor(pad / 3)),
-        smallbtn("Vol +", "c=volume_up", state ~= nil),
-        hspan(math.floor(pad / 3)),
-        smallbtn("+15s", "c=fwd15", playing),
-    })
-    -- sound output + volume: tap to pick where the Mac plays (speakers, headphones, ...)
-    local out = state and type(state.output) == "string" and state.output ~= "" and state.output
-    if vol or out then
-        local label = (out and out .. (vol and "  ·  " or "") or "")
-            .. (vol and _("Volume") .. " " .. tostring(vol) or "") .. (out and "  ›" or "")
-        table.insert(v, vspan(8))
-        table.insert(v, tbtn(label,
-            function() self:showOutputs() end, out and true or false,
-            sw - 2 * pad, math.floor(sh * 0.04), 17))
+    elseif playing then
+        table.insert(main, vspan(art_h))
+    else
+        local clock = (os.date("%I:%M"):gsub("^0", ""))
+        table.insert(main, text(self.offline and _("Mac unreachable") or clock,
+            self.offline and 32 or 150, C_HI))
+        table.insert(main, vspan(math.floor(sh * 0.02)))
+        table.insert(main, text(self.offline and _("Retrying every few seconds") or _("Nothing playing"), 20, C_MUTE))
     end
 
-    -- bottom row: lock, theme, close
-    table.insert(v, vspan(math.floor(sh * 0.012)))
-    table.insert(v, HorizontalGroup:new{ align = "center",
-        bigbtn(_("Lock"), function() self:setLocked(true) end, true),
-        hspan(math.floor(pad / 2)),
-        bigbtn(_("Theme") .. ": " .. THEME_LABELS[self:theme()], function() self:cycleTheme() end, true),
-        hspan(math.floor(pad / 2)),
-        bigbtn(_("Close"), function() self:closeDock() end, true),
-    })
+    if playing then
+        -- title and artist
+        table.insert(main, vspan(math.floor(sh * 0.03)))
+        table.insert(main, text(state.track or "", 30, C_HI, { bold = true, max_width = inner_w }))
+        table.insert(main, vspan(math.floor(sh * 0.008)))
+        local sub = state.artist or ""
+        if type(state.album) == "string" and state.album ~= "" then
+            sub = sub ~= "" and (sub .. "  ·  " .. state.album) or state.album
+        end
+        table.insert(main, text(sub, 20, C_DIM, { max_width = inner_w }))
 
-    return v
+        -- progress: tap anywhere along the bar to seek; times at either end
+        if (state.duration or 0) > 0 then
+            table.insert(main, vspan(math.floor(sh * 0.025)))
+            local bar_h = math.floor(sh * 0.008)
+            local hit_h = bar_h * 6
+            local dur = state.duration
+            local bar = InputContainer:new{
+                dimen = Geom:new{ w = inner_w, h = hit_h },
+                centered(inner_w, hit_h, ProgressWidget:new{
+                    width = inner_w, height = bar_h,
+                    percentage = math.min(1, (state.position or 0) / dur),
+                    fillcolor = C_HI, bgcolor = C_TRK,
+                    bordersize = 0, radius = 0,
+                }),
+            }
+            bar.ges_events = {
+                Tap = { GestureRange:new{ ges = "tap", range = function() return bar.dimen end } },
+            }
+            function bar:onTap(_, ges)
+                if kd.locked then return true end
+                local frac = math.max(0, math.min(1, (ges.pos.x - self.dimen.x) / self.dimen.w))
+                kd:sendCommand(string.format("c=seek&to=%.1f", frac * dur))
+                return true
+            end
+            table.insert(main, bar)
+            local left = text(fmt_time(state.position), 16, C_MUTE)
+            local right = text(fmt_time(dur), 16, C_MUTE)
+            local mid = text(type(state.queue) == "table"  -- json null decodes to a sentinel function
+                and (state.queue[1] .. " of " .. state.queue[2]) or "", 16, C_MUTE)
+            local gap = (inner_w - left:getSize().w - mid:getSize().w - right:getSize().w) / 2
+            table.insert(main, HorizontalGroup:new{
+                left, hspan(math.floor(gap)), mid, hspan(math.ceil(gap)), right,
+            })
+        end
+    end
+
+    -- controls (hidden while locked, so the dock is a display only)
+    if not self.locked and state then
+        local row_h = math.floor(sh * 0.065)
+        local modes = type(state.modes) == "table" and state.modes or nil
+        local cell = math.floor(inner_w / 5)
+        local function mode_btn(icon, cmd, on)
+            if not modes then return hspan(cell) end
+            return tbtn(icon, cmd, cell, row_h, 24, on and C_HI or C_MUTE)
+        end
+        local rep = modes and modes["repeat"] or "off"
+        table.insert(main, vspan(math.floor(sh * 0.03)))
+        table.insert(main, HorizontalGroup:new{ align = "center",
+            mode_btn(ICON.shuffle, "c=shuffle", modes and modes.shuffle),
+            tbtn(ICON.prev, "c=prev", cell, row_h, 32, C_HI),
+            tbtn(state.state == "playing" and ICON.pause or ICON.play, "c=toggle", cell, row_h, 46, C_HI),
+            tbtn(ICON.next, "c=next", cell, row_h, 32, C_HI),
+            mode_btn(rep == "one" and (ICON["repeat"] .. " 1") or ICON["repeat"], "c=repeat", rep ~= "off"),
+        })
+        local cell4 = math.floor(inner_w / 4)
+        local small_h = math.floor(sh * 0.05)
+        table.insert(main, vspan(math.floor(sh * 0.01)))
+        table.insert(main, HorizontalGroup:new{ align = "center",
+            tbtn("\u{2212}15", "c=back15", cell4, small_h, 20, C_DIM),
+            tbtn(ICON.vol_down, "c=volume_down", cell4, small_h, 22, C_DIM),
+            tbtn(ICON.vol_up, "c=volume_up", cell4, small_h, 22, C_DIM),
+            tbtn("+15", "c=fwd15", cell4, small_h, 20, C_DIM),
+        })
+        -- sound output + volume: tap to pick where the Mac plays
+        local out = type(state.output) == "string" and state.output ~= "" and state.output
+        if out then
+            local vol = type(state.volume) == "number" and ("  ·  " .. state.volume .. "%") or ""
+            table.insert(main, vspan(math.floor(sh * 0.01)))
+            table.insert(main, tbtn(ICON.output .. "  " .. out .. vol .. "  \u{203A}",
+                function() kd:showOutputs() end, inner_w, small_h, 17, C_DIM))
+        end
+    end
+
+    -- footer, pinned to the bottom edge
+    local foot_h = math.floor(sh * 0.05)
+    local footer
+    if self.locked then
+        footer = centered(sw, foot_h, text(ICON.lock .. "  " .. _("Hold anywhere to unlock"), 16, C_MUTE))
+    else
+        local items = {}
+        if state and state.app == "com.apple.Music" then  -- /queue is Apple Music only
+            table.insert(items, { ICON.queue .. "  " .. _("Queue"), function() kd:showQueue() end })
+        end
+        table.insert(items, { ICON.lock .. "  " .. _("Lock"), function() kd:setLocked(true) end })
+        table.insert(items, { _("Close"), function() kd:closeDock() end })
+        local w = math.floor(inner_w / #items)
+        footer = HorizontalGroup:new{ align = "center" }
+        for _, it in ipairs(items) do
+            table.insert(footer, tbtn(it[1], it[2], w, foot_h, 17, C_MUTE))
+        end
+    end
+
+    local bottom = math.floor(sh * 0.02)
+    return VerticalGroup:new{ align = "center",
+        centered(sw, sh - foot_h - bottom, main),
+        centered(sw, foot_h, footer),
+    }
 end
 
 function KindleDock:refreshScreen(refresh)
