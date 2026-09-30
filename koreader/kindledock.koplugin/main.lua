@@ -532,7 +532,7 @@ function KindleDock:openDock()
         if kd.locked then kd:setLocked(false) end
         return true
     end
-    UIManager:show(self.root)
+    UIManager:show(self.root, "full")  -- clear the screen underneath; e-ink ghosts otherwise
     pcall(function() self:poll(true) end)
     self:scheduleNext()
 end
