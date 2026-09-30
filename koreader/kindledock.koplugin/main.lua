@@ -30,6 +30,7 @@ local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
+local GestureRange = require("ui/gesturerange")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = Device.screen
 local Size = require("ui/size")
@@ -60,6 +61,11 @@ function KindleDock:onDispatcherRegisterActions()
     })
 end
 
+
+function KindleDock:isDark()
+    return (self.settings:readSetting("theme") or "dark") == "dark"
+end
+
 function KindleDock:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/kindledock.lua")
     self.ui.menu:registerToMainMenu(self)
@@ -79,7 +85,7 @@ end
 function KindleDock:addToMainMenu(menu_items)
     menu_items.kindledock = {
         text = _("Now Playing"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         callback = function()
             if not self:serverUrl() then
                 self:showSetup()
@@ -173,10 +179,18 @@ end
 function KindleDock:fetchArtwork(track_id)
     local raw, code = self:request("GET", "/artwork.png?track=" .. tostring(track_id or ""))
     if not raw or code ~= 200 then return false end
-    local f = io.open(ART_PATH, "wb")
+    -- reject truncated/non-PNG payloads: a corrupt file would make ImageWidget
+    -- throw during render and kill the poll loop (frozen title + art)
+    if #raw < 100 or raw:sub(2, 4) ~= "PNG" then return false end
+    -- per-track path: ImageWidget caches decoded art by filename, so a constant
+    -- path would keep showing the previous track's cover
+    local path = "/tmp/kindledock_art_" .. tostring(track_id or "x") .. ".png"
+    local f = io.open(path, "wb")
     if not f then return false end
     f:write(raw)
     f:close()
+    if self.art_path and self.art_path ~= path then os.remove(self.art_path) end
+    self.art_path = path
     return true
 end
 
@@ -211,6 +225,11 @@ function KindleDock:buildContent()
     local state = self.state
     local v = VerticalGroup:new{ align = "center" }
     local pad = math.floor(sw * 0.05)
+    local dark = self:isDark()
+    local C_HI   = dark and Blitbuffer.COLOR_WHITE      or Blitbuffer.COLOR_BLACK
+    local C_DIM  = dark and Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_DARK_GRAY
+    local C_FILL = dark and Blitbuffer.COLOR_WHITE      or Blitbuffer.COLOR_BLACK
+    local C_TRK  = dark and Blitbuffer.COLOR_DARK_GRAY  or Blitbuffer.COLOR_LIGHT_GRAY
 
     local function hspan(w) return HorizontalSpan:new{ width = w } end
     local function vspan(h) return VerticalSpan:new{ width = h } end
@@ -234,20 +253,42 @@ function KindleDock:buildContent()
 
     local playing = state and (state.state == "playing" or state.state == "paused")
 
-    -- cover art
-    local cover_size = math.floor(sw * 0.55)
+    -- cover art: video (browser) = 16:9, music = square album art
+    local BROWSER_APPS = {
+        ["com.google.Chrome"] = true,
+        ["com.apple.Safari"] = true,
+        ["company.thebrowser.Browser"] = true,
+        ["com.brave.Browser"] = true,
+        ["org.mozilla.firefox"] = true,
+        ["com.microsoft.edgemac"] = true,
+    }
+    local cover_w, cover_h
+    if state and BROWSER_APPS[state.app or ""] then
+        cover_w = math.floor(sw * 0.8)
+        cover_h = math.floor(cover_w * 9 / 16)
+    else
+        cover_w = math.floor(sw * 0.55)
+        cover_h = cover_w
+    end
     if playing and self.have_art then
         table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = cover_size },
-            ImageWidget:new{
-                file = ART_PATH,
-                width = cover_size,
-                height = cover_size,
+            dimen = Geom:new{ w = sw, h = cover_h },
+            FrameContainer:new{
+                padding = 0,
+                margin = 0,
+                bordersize = dark and Size.border.thin or 0,
+                color = C_DIM,
+                background = Blitbuffer.COLOR_BLACK,
+                ImageWidget:new{
+                    file = self.art_path or ART_PATH,
+                    width = cover_w,
+                    height = cover_h,
+                },
             },
         })
     else
         table.insert(v, CenterContainer:new{
-            dimen = Geom:new{ w = sw, h = cover_size },
+            dimen = Geom:new{ w = sw, h = cover_h },
             TextWidget:new{
                 text = playing and "" or (self.offline and _("Mac unreachable") or _("Nothing playing")),
                 face = Font:getFace("cfont", 26),
@@ -266,6 +307,7 @@ function KindleDock:buildContent()
                 face = Font:getFace("cfont", 30),
                 max_width = sw - 2 * pad,
                 bold = true,
+                fgcolor = C_HI,
             },
         })
         local sub = state.artist or ""
@@ -278,7 +320,7 @@ function KindleDock:buildContent()
                 text = sub,
                 face = Font:getFace("cfont", 22),
                 max_width = sw - 2 * pad,
-                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+                fgcolor = C_DIM,
             },
         })
     else
@@ -287,6 +329,7 @@ function KindleDock:buildContent()
             TextWidget:new{
                 text = self.offline and _("Could not reach the Mac") or _("Play something on the Mac"),
                 face = Font:getFace("cfont", 24),
+                fgcolor = C_HI,
             },
         })
     end
@@ -299,14 +342,14 @@ function KindleDock:buildContent()
             width = sw - 2 * pad,
             height = math.floor(sh * 0.012),
             percentage = pct,
-            fillcolor = Blitbuffer.COLOR_BLACK,
-            bgcolor = Blitbuffer.COLOR_LIGHT_GRAY,
+            fillcolor = C_FILL,
+            bgcolor = C_TRK,
         })
         table.insert(v, vspan(8))
         table.insert(v, TextWidget:new{
             text = fmt_time(state.position) .. "  /  " .. fmt_time(state.duration),
             face = Font:getFace("cfont", 18),
-            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            fgcolor = C_DIM,
         })
     end
 
@@ -315,7 +358,30 @@ function KindleDock:buildContent()
     local btn_h = math.floor(sh * 0.062)
     local small_w = math.floor((sw - 2 * pad) / 4.6)
     local small_h = math.floor(sh * 0.05)
+    local function tbtn(label, cmd, enabled, w, h, fsize)
+        local kd = self
+        local btn = InputContainer:new{
+            dimen = Geom:new{ w = w, h = h },
+            CenterContainer:new{
+                dimen = Geom:new{ w = w, h = h },
+                TextWidget:new{
+                    text = label,
+                    face = Font:getFace("cfont", fsize),
+                    fgcolor = (enabled == false) and Blitbuffer.COLOR_GRAY or C_HI,
+                },
+            },
+        }
+        btn.ges_events = {
+            Tap = { GestureRange:new{ ges = "tap", range = function() return btn.dimen end } },
+        }
+        function btn:onTap()
+            if enabled ~= false then kd:sendCommand(cmd) end
+            return true
+        end
+        return btn
+    end
     local function bigbtn(label, cmd, enabled)
+        if dark then return tbtn(label, cmd, enabled, btn_w, btn_h, 22) end
         return Button:new{
             text = label,
             width = btn_w,
@@ -327,6 +393,7 @@ function KindleDock:buildContent()
         }
     end
     local function smallbtn(label, cmd, enabled)
+        if dark then return tbtn(label, cmd, enabled, small_w, small_h, 18) end
         return Button:new{
             text = label,
             width = small_w,
@@ -367,14 +434,30 @@ function KindleDock:buildContent()
 
     -- close
     table.insert(v, vspan(math.floor(sh * 0.02)))
-    table.insert(v, Button:new{
-        text = _("Close"),
-        width = math.floor(sw * 0.4),
-        height = btn_h,
-        text_font_face = "cfont",
-        text_font_size = 20,
-        callback = function() self:closeDock() end,
-    })
+    if dark then
+        local kd = self
+        local cbtn = InputContainer:new{
+            dimen = Geom:new{ w = math.floor(sw * 0.4), h = btn_h },
+            CenterContainer:new{
+                dimen = Geom:new{ w = math.floor(sw * 0.4), h = btn_h },
+                TextWidget:new{ text = _("Close"), face = Font:getFace("cfont", 20), fgcolor = C_HI },
+            },
+        }
+        cbtn.ges_events = {
+            Tap = { GestureRange:new{ ges = "tap", range = function() return cbtn.dimen end } },
+        }
+        function cbtn:onTap() kd:closeDock() return true end
+        table.insert(v, cbtn)
+    else
+        table.insert(v, Button:new{
+            text = _("Close"),
+            width = math.floor(sw * 0.4),
+            height = btn_h,
+            text_font_face = "cfont",
+            text_font_size = 20,
+            callback = function() self:closeDock() end,
+        })
+    end
 
     return v
 end
@@ -418,6 +501,7 @@ function KindleDock:openDock()
     self.state = nil
     self.last_track_id = nil
     self.have_art = false
+    self.art_path = nil
     local sw, sh = Screen:getWidth(), Screen:getHeight()
     self.root = InputContainer:new{
         dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh },
@@ -427,20 +511,21 @@ function KindleDock:openDock()
             height = sh,
             padding = 0,
             margin = 0,
-            background = Blitbuffer.COLOR_WHITE,
+            background = self:isDark() and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE,
             self:buildContent(),
         },
     }
     UIManager:show(self.root)
-    self:poll(true)
+    pcall(function() self:poll(true) end)
     self:scheduleNext()
 end
 
 function KindleDock:scheduleNext()
-    -- re-arm the poll loop
+    -- re-arm the poll loop; a poll error must never kill the loop
     UIManager:scheduleIn(POLL_SECONDS, function()
         if not self.dock_open then return end
-        self:poll()
+        local ok, err = pcall(function() self:poll() end)
+        if not ok then logger.warn("kindledock: poll error:", err) end
         self:scheduleNext()
     end)
 end

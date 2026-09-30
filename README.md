@@ -6,8 +6,9 @@ Turn a jailbroken Kindle into an always-on now-playing display and remote contro
 
 ## What it does
 
-- Shows what's playing on your Mac - track, artist, album art - on a clean e-ink UI that looks native to the device
-- Works system-wide: Apple Music, Spotify, and browser audio (YouTube included) via [media-control](https://github.com/ungive/media-control); YouTube gets real video thumbnails
+- Controls whatever your Mac is playing - Apple Music, Spotify, YouTube, Netflix, anything the macOS now-playing system can see
+- Shows it on a clean e-ink UI that looks native to the device: track, artist, and art (square album covers for music, 16:9 thumbnails for video)
+- Dark and light themes, flat text controls, hairline progress - no phone UI glued onto e-ink
 - Controls playback from the Kindle: play/pause, next/previous, ±15s seek, volume
 - Runs as a KOReader plugin: open it from Tools > More tools > Now Playing, or bind a gesture (e.g. swipe right along the top edge) to open it anywhere
 - Zero-touch: the Mac daemon starts at login (launchd), KOReader starts at boot on the Kindle, and the two reconnect on their own over your LAN or Tailscale

@@ -15,7 +15,7 @@ This file is written for a coding agent. Follow it top to bottom and you will ha
 3. For browser seek support (YouTube ±15s): in Chrome, enable View > Developer > Allow JavaScript from Apple Events. Approve the Automation permission the first time the daemon drives Chrome.
 4. Install the launchd agent: copy `install/com.kindledock.daemon.plist` to `~/Library/LaunchAgents/`, edit the paths inside to match where you put the script and log, then `launchctl load ~/Library/LaunchAgents/com.kindledock.daemon.plist`.
 5. First run creates `~/.config/kindledock/config.json` with `{"port": 8931, "token": "<random>"}`.
-6. Verify: `curl -s -H "Authorization: Bearer <token>" http://localhost:8931/now-playing` returns JSON while something plays. `curl -s -X POST -H "Authorization: Bearer <token>" http://localhost:8931/cmd -d '{"cmd":"playpause"}'` toggles playback.
+6. Verify: `curl -s -H "Authorization: Bearer <token>" http://localhost:8931/nowplaying` returns JSON while something plays. `curl -s -X POST -H "Authorization: Bearer <token>" http://localhost:8931/cmd -d '{"cmd":"playpause"}'` toggles playback.
 
 ## Step 2 - Kindle plugin
 
@@ -34,7 +34,11 @@ Bind a gesture to open the dock from anywhere:
 3. Restart KOReader as above. Swiping right along the top edge now opens Now Playing.
 4. Or do it in the UI: Gesture manager > pick a gesture > Device (or General) > "KindleDock: open Now Playing".
 
-## Step 4 - Dock behavior
+## Step 4 - Theme
+
+The dock defaults to a dark (true-black) theme. For the light theme, edit `/mnt/us/koreader/settings/kindledock.lua`, add `["theme"] = "light",` inside the table, and restart KOReader.
+
+## Step 5 - Dock behavior
 
 While docked and plugged in, you want the Kindle awake and reachable. KOReader: Settings > Screen > turn off autosuspend, or use the keepalive approach described in docs/sleep-wake.md. When undocked, re-enable normal sleep for battery life.
 
