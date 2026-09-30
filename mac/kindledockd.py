@@ -15,9 +15,10 @@ Endpoints:
 
 Config: ~/.config/kindledock/config.json {"port": 8931, "token": "<auto>"}
 """
-import json, os, subprocess, threading, time, secrets, base64
+import json, os, subprocess, hashlib, threading, time, secrets, base64, re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 
 CFG_DIR = os.path.expanduser("~/.config/kindledock")
 RUN_DIR = os.path.expanduser("~/.local/share/kindledock")
@@ -84,16 +85,85 @@ def nowplaying():
             pass
     dur = j.get("duration") or 0.0
     if dur and pos > dur: pos = dur
+    LAST_APP[0] = j.get("bundleIdentifier")
     uid = j.get("uniqueIdentifier")
     track_id = ("%x" % (uid & 0xFFFFFFFFFFFF)) if isinstance(uid, int) else None
+    if not track_id and j.get("title"):
+        track_id = hashlib.md5(((j.get("title") or "") + "|" + (j.get("artist") or "")).encode()).hexdigest()[:12]
     return {
         "state": "playing" if j.get("playing") else ("paused" if j.get("title") else "idle"),
         "track": j.get("title"), "artist": j.get("artist"), "album": j.get("album"),
         "duration": round(dur, 1), "position": round(pos, 1),
         "app": j.get("bundleIdentifier"), "media_type": j.get("mediaType"),
-        "volume": get_volume(), "has_artwork": bool(j.get("artworkData")),
+        "volume": get_volume(),
+        "has_artwork": bool(j.get("artworkData")) or (j.get("bundleIdentifier") in BROWSERS),
         "track_id": track_id, "server_time": round(time.time(), 1),
     }
+
+
+BROWSERS = {
+    "com.google.Chrome": ("Google Chrome", "URL of active tab of front window"),
+    "com.brave.Browser": ("Brave Browser", "URL of active tab of front window"),
+    "com.microsoft.edgemac": ("Microsoft Edge", "URL of active tab of front window"),
+    "com.vivaldi.Vivaldi": ("Vivaldi", "URL of active tab of front window"),
+    "company.thebrowser.Browser": ("Arc", "URL of active tab of front window"),
+    "com.apple.Safari": ("Safari", "URL of front document"),
+}
+_YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?[^#]*v=|shorts/|embed/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})")
+LAST_APP = [None]
+
+def tab_url(app):
+    b = BROWSERS.get(app or "")
+    if not b: return None
+    rc, out, _ = osa('tell application "%s" to get %s' % b)
+    if rc != 0: return None
+    u = out.strip()
+    return u if u.startswith("http") else None
+
+def yt_thumb_jpg():
+    u = tab_url(LAST_APP[0])
+    if not u: return None
+    m = _YT_RE.search(u)
+    if not m: return None
+    vid = m.group(1)
+    for name in ("maxresdefault", "hqdefault"):
+        try:
+            req = urllib.request.Request(
+                "https://i.ytimg.com/vi/%s/%s.jpg" % (vid, name),
+                headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = r.read()
+            if name == "maxresdefault" and len(data) < 5000:
+                continue  # placeholder image when maxres missing
+            if len(data) < 1000: continue
+            return data
+        except Exception:
+            continue
+    return None
+
+
+def browser_seek(delta):
+    b = BROWSERS.get(LAST_APP[0] or "")
+    if not b: return False, "not a browser"
+    name = b[0]
+    js = ("(function(){var v=document.querySelector('video');"
+          "if(v){v.currentTime=Math.max(0,Math.min(v.duration||1e9,v.currentTime+(%d)));return 'ok'}"
+          "return 'no'}())" % delta)
+    if name == "Safari":
+        script = ('tell application "Safari"\n'
+                  'repeat with w in windows\nrepeat with t in tabs of w\ntry\n'
+                  'set r to (do JavaScript "%s" in t)\n'
+                  'if r is "ok" then return "ok"\n'
+                  'end try\nend repeat\nend repeat\nreturn "novideo"\nend tell' % js)
+    else:
+        script = ('tell application "%s"\n'
+                  'repeat with w in windows\nrepeat with t in tabs of w\ntry\n'
+                  'set r to (execute t javascript "%s")\n'
+                  'if r is "ok" then return "ok"\n'
+                  'end try\nend repeat\nend repeat\nreturn "novideo"\nend tell' % (name, js))
+    rc, out, _ = osa(script, timeout=20)
+    ok = rc == 0 and out.strip() == "ok"
+    return ok, ("" if ok else ("no <video> in any tab" if rc == 0 else "applescript rc %d" % rc))
 
 _art_lock = threading.Lock()
 def artwork_png(track_id):
@@ -105,15 +175,20 @@ def artwork_png(track_id):
         if track_id and os.path.exists(png) and os.path.exists(marker):
             if open(marker).read().strip() == track_id:
                 with open(png, "rb") as f: return f.read()
-        rc, out, _ = mc("get", timeout=15)
-        if rc != 0: return None
-        try:
-            data = json.loads(out).get("artworkData")
-        except json.JSONDecodeError:
-            return None
-        if not data: return None
+        blob = None
+        if LAST_APP[0] in BROWSERS:
+            blob = yt_thumb_jpg()
+        if blob is None:
+            rc, out, _ = mc("get", timeout=15)
+            if rc != 0: return None
+            try:
+                data = json.loads(out).get("artworkData")
+            except json.JSONDecodeError:
+                return None
+            if not data: return None
+            blob = base64.b64decode(data)
         with open(raw, "wb") as f:
-            f.write(base64.b64decode(data))
+            f.write(blob)
         p = subprocess.run(["sips", "-s", "format", "png", "-Z", "640", raw, "--out", png],
                            capture_output=True, timeout=20)
         if p.returncode != 0 or not os.path.exists(png): return None
@@ -130,6 +205,11 @@ MC_COMMANDS = {
 
 def run_command(qs):
     c = qs.get("c", [""])[0]
+    if c in ("back15", "fwd15") and LAST_APP[0] in BROWSERS:
+        ok, err = browser_seek(-15 if c == "back15" else 15)
+        if ok: return {"ok": True}
+        rc, _, err2 = mc(*MC_COMMANDS[c])
+        return {"ok": rc == 0, "err": (err2[:200] if rc else err)}
     if c in MC_COMMANDS:
         rc, _, err = mc(*MC_COMMANDS[c])
         return {"ok": rc == 0, "err": err[:200] if rc else ""}

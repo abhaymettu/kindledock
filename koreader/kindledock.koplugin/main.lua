@@ -15,6 +15,8 @@ local DataStorage = require("datastorage")
 local Device = require("device")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
+local InputContainer = require("ui/widget/container/inputcontainer")
+local Dispatcher = require("dispatcher")
 local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
@@ -44,6 +46,20 @@ local KindleDock = WidgetContainer:extend{
     is_doc_only = false,
 }
 
+function KindleDock:onKindleDockOpen()
+    self:openDock()
+    return true
+end
+
+function KindleDock:onDispatcherRegisterActions()
+    Dispatcher:registerAction("kindledock_open", {
+        category = "none",
+        event = "KindleDockOpen",
+        title = _("Now Playing"),
+        device = true,
+    })
+end
+
 function KindleDock:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/kindledock.lua")
     self.ui.menu:registerToMainMenu(self)
@@ -62,8 +78,8 @@ end
 
 function KindleDock:addToMainMenu(menu_items)
     menu_items.kindledock = {
-        text = _("Kindle Dock"),
-        sorting_hint = "tools",
+        text = _("Now Playing"),
+        sorting_hint = "more_tools",
         callback = function()
             if not self:serverUrl() then
                 self:showSetup()
@@ -71,12 +87,9 @@ function KindleDock:addToMainMenu(menu_items)
                 self:openDock()
             end
         end,
-        sub_item_table = {
-            {
-                text = _("Server settings"),
-                callback = function() self:showSetup() end,
-            },
-        },
+        hold_callback = function()
+            self:showSetup()
+        end,
     }
 end
 
@@ -368,7 +381,7 @@ end
 
 function KindleDock:refreshScreen(refresh)
     if not self.root then return end
-    self.root[1] = self:buildContent()
+    self.root[1][1] = self:buildContent()
     UIManager:setDirty(self.root, refresh or "ui")
 end
 
@@ -382,8 +395,16 @@ function KindleDock:poll(force_refresh)
             track_changed = true
             self.last_track_id = state.track_id
             self.have_art = state.has_artwork and self:fetchArtwork(state.track_id) or false
+            self.last_art_try = os.time()
         elseif not state.track_id then
             self.have_art = false
+        end
+        if state.track_id and state.has_artwork and not self.have_art then
+            if not self.last_art_try or (os.time() - self.last_art_try) >= 10 then
+                self.last_art_try = os.time()
+                self.have_art = self:fetchArtwork(state.track_id)
+                if self.have_art then track_changed = true end
+            end
         end
         self.state = state
     else
@@ -398,13 +419,17 @@ function KindleDock:openDock()
     self.last_track_id = nil
     self.have_art = false
     local sw, sh = Screen:getWidth(), Screen:getHeight()
-    self.root = FrameContainer:new{
-        width = sw,
-        height = sh,
-        padding = 0,
-        margin = 0,
-        background = Blitbuffer.COLOR_WHITE,
-        self:buildContent(),
+    self.root = InputContainer:new{
+        dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh },
+        covers_fullscreen = true,
+        FrameContainer:new{
+            width = sw,
+            height = sh,
+            padding = 0,
+            margin = 0,
+            background = Blitbuffer.COLOR_WHITE,
+            self:buildContent(),
+        },
     }
     UIManager:show(self.root)
     self:poll(true)
@@ -426,6 +451,7 @@ function KindleDock:closeDock()
         UIManager:close(self.root)
         self.root = nil
     end
+    UIManager:setDirty("all", "full")
 end
 
 return KindleDock

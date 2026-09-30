@@ -1,78 +1,47 @@
 # kindledock
 
-Turn a jailbroken Kindle into a now-playing display and remote control for your Mac.
+Turn a jailbroken Kindle into an always-on now-playing display and remote control for the music playing on your Mac.
 
-Your Mac already knows what's playing - system-wide, for any app: Apple Music,
-Spotify, YouTube in a browser, anything that shows up in the macOS Control Center
-now-playing tile. kindledock serves that state over your LAN/Tailscale, and a
-KOReader plugin renders it on the Kindle's e-ink screen: cover art, track info,
-progress, and playback controls. No audio on the Kindle - it's a remote, not a
-speaker. Latency is a second or two and that's fine.
+![kindledock on a Kindle](docs/screenshot.png)
 
-![screenshot](docs/screenshot.png)
+## What it does
 
-## What you get
+- Shows what's playing on your Mac - track, artist, album art - on a clean e-ink UI that looks native to the device
+- Works system-wide: Apple Music, Spotify, and browser audio (YouTube included) via [media-control](https://github.com/ungive/media-control); YouTube gets real video thumbnails
+- Controls playback from the Kindle: play/pause, next/previous, ±15s seek, volume
+- Runs as a KOReader plugin: open it from Tools > More tools > Now Playing, or bind a gesture (e.g. swipe right along the top edge) to open it anywhere
+- Zero-touch: the Mac daemon starts at login (launchd), KOReader starts at boot on the Kindle, and the two reconnect on their own over your LAN or Tailscale
+- The Kindle never sleeps while docked, so it's always reachable and always showing the current track
 
-- Cover art, title / artist / album, progress bar, app badge
-- Play / pause / previous / next
-- -15s / +15s skip
-- System volume up / down
-- Works for whatever the Mac is playing, not just one app
-- Clean e-ink layout (designed for a 1072x1448 Kindle, adapts to other sizes)
+The Kindle is a display and remote only - audio keeps playing on the Mac.
 
 ## How it works
 
 ```
-[ any app on the Mac ]
-        |  macOS now-playing (via media-control)
+kindledock.koplugin (KOReader, on the Kindle)
+        |  HTTP GET /now-playing  (poll)
+        |  HTTP POST /cmd         (play/pause/seek/volume)
         v
- kindledockd.py  --(launchd, port 8931)-->  HTTP + bearer token
-        |                                       |
-        v                                       v
-   Apple Music etc.                    KOReader plugin (Kindle)
-   (playback + volume)                polls /nowplaying every 3s,
-                                       sends /cmd on button taps
+kindledockd.py (launchd agent, port 8931, on the Mac)
+        |  media-control stream   (now-playing state, system-wide)
+        |  AppleScript / media keys (playback control)
 ```
 
-The Mac side reads the system now-playing layer with
-[media-control](https://github.com/ungive/media-control) - macOS 15.4 broke the
-old private-framework path, media-control is the maintained workaround. Volume
-goes through AppleScript. The Kindle side is pure Lua inside KOReader.
+The daemon bears a token (auto-generated on first run, `~/.config/kindledock/config.json`); the plugin presents it on every request. Both devices just need to reach each other - same LAN, or Tailscale if your LAN is CGNAT or you want it to work away from home.
 
-## Install
+## Setup
 
-### Mac
+The full end-to-end setup - written so a coding agent can do it for you - is in [AGENTS.md](AGENTS.md).
 
-```sh
-brew tap ungive/media-control && brew install media-control
-cp mac/kindledockd.py ~/kindledockd.py
-# edit install/com.kindledock.daemon.plist path if needed, then:
-cp install/com.kindledock.daemon.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.kindledock.daemon.plist
-cat ~/.config/kindledock/config.json   # <- your token and port
-```
+## Docs
 
-### Kindle (jailbroken, KOReader)
+- [docs/sleep-wake.md](docs/sleep-wake.md) - research on Kindle sleep/wake behavior, boot persistence, and prior art in this space
 
-Copy `koreader/kindledock.koplugin` into `/mnt/us/koreader/plugins/`, restart
-KOReader, then open Kindle Dock from the tools menu and enter the Mac's address
-(IP or Tailscale hostname), port, and token. Both devices just need to reach
-each other - same Wi-Fi, or Tailscale.
+## Requirements
 
-## Configuration
-
-- Mac: `~/.config/kindledock/config.json` (`port`, `token` - auto-generated on
-  first run). Runtime files (artwork cache, log) in `~/.local/share/kindledock/`.
-- Kindle: settings are stored by the plugin in KOReader's settings directory
-  (`kindledock.lua`).
-
-## Roadmap
-
-- Duty-cycled RTC wake so the Kindle can sleep yet still be reachable
-  (see docs/sleep-wake.md for the research)
-- Auto-open on playback start
-- Seek by tapping the progress bar
+- A jailbroken Kindle with [KOReader](https://github.com/koreader/koreader) installed
+- A Mac (the daemon uses macOS media APIs and AppleScript)
 
 ## License
 
-MIT
+MIT - see [LICENSE](LICENSE).
