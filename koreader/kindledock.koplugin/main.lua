@@ -62,8 +62,33 @@ function KindleDock:onDispatcherRegisterActions()
 end
 
 
+-- theme: "dark" (default), "light", or "auto" (dark from 19:00 to 07:00)
+local THEMES = { dark = "light", light = "auto", auto = "dark" }
+local THEME_LABELS = { dark = _("Dark"), light = _("Light"), auto = _("Auto") }
+
+function KindleDock:theme()
+    local t = self.settings:readSetting("theme") or "dark"
+    return THEMES[t] and t or "dark"
+end
+
 function KindleDock:isDark()
-    return (self.settings:readSetting("theme") or "dark") == "dark"
+    local t = self:theme()
+    if t == "auto" then
+        local h = tonumber(os.date("%H"))
+        return h >= 19 or h < 7
+    end
+    return t == "dark"
+end
+
+function KindleDock:cycleTheme()
+    self.settings:saveSetting("theme", THEMES[self:theme()])
+    self.settings:flush()
+    self:refreshScreen()  -- goes full on its own when the effective theme flips
+end
+
+function KindleDock:setLocked(locked)
+    self.locked = locked
+    self:refreshScreen("full")
 end
 
 function KindleDock:init()
@@ -262,6 +287,9 @@ function KindleDock:buildContent()
     local top_text
     if state and state.app then
         top_text = string.upper(self:appLabel(state.app))
+        if type(state.queue) == "table" then  -- json null decodes to a sentinel function
+            top_text = top_text .. "  ·  " .. state.queue[1] .. " OF " .. state.queue[2]
+        end
     elseif self.offline then
         top_text = "OFFLINE"
     else
@@ -275,7 +303,7 @@ function KindleDock:buildContent()
     })
     table.insert(v, vspan(math.floor(sh * 0.02)))
 
-    local playing = state and (state.state == "playing" or state.state == "paused")
+    local playing = state ~= nil and (state.state == "playing" or state.state == "paused")
 
     -- cover art: video (browser) = 16:9, music = square album art
     local BROWSER_APPS = {
@@ -392,6 +420,7 @@ function KindleDock:buildContent()
             Tap = { GestureRange:new{ ges = "tap", range = function() return bar.dimen end } },
         }
         function bar:onTap(_, ges)
+            if kd.locked then return true end
             local frac = math.max(0, math.min(1, (ges.pos.x - self.dimen.x) / self.dimen.w))
             kd:sendCommand(string.format("c=seek&to=%.1f", frac * dur))
             return true
@@ -459,6 +488,16 @@ function KindleDock:buildContent()
             callback = function() self:runCommand(cmd) end,
         }
     end
+    if self.locked then
+        -- docked display: no controls, so a brush against the screen does nothing
+        table.insert(v, vspan(math.floor(sh * 0.05)))
+        table.insert(v, TextWidget:new{
+            text = _("Locked  ·  hold anywhere to unlock"),
+            face = Font:getFace("cfont", 16),
+            fgcolor = Blitbuffer.COLOR_GRAY,
+        })
+        return v
+    end
     table.insert(v, vspan(math.floor(sh * 0.02)))
     table.insert(v, HorizontalGroup:new{ align = "center",
         bigbtn("<<", "c=prev", playing),
@@ -479,7 +518,7 @@ function KindleDock:buildContent()
         smallbtn("+15s", "c=fwd15", playing),
     })
     -- sound output + volume: tap to pick where the Mac plays (speakers, headphones, ...)
-    local out = state and state.output ~= "" and state.output
+    local out = state and type(state.output) == "string" and state.output ~= "" and state.output
     if vol or out then
         local label = (out and out .. (vol and "  ·  " or "") or "")
             .. (vol and _("Volume") .. " " .. tostring(vol) or "") .. (out and "  ›" or "")
@@ -489,38 +528,25 @@ function KindleDock:buildContent()
             sw - 2 * pad, math.floor(sh * 0.04), 17))
     end
 
-    -- close
-    table.insert(v, vspan(math.floor(sh * 0.02)))
-    if dark then
-        local kd = self
-        local cbtn = InputContainer:new{
-            dimen = Geom:new{ w = math.floor(sw * 0.4), h = btn_h },
-            CenterContainer:new{
-                dimen = Geom:new{ w = math.floor(sw * 0.4), h = btn_h },
-                TextWidget:new{ text = _("Close"), face = Font:getFace("cfont", 20), fgcolor = C_HI },
-            },
-        }
-        cbtn.ges_events = {
-            Tap = { GestureRange:new{ ges = "tap", range = function() return cbtn.dimen end } },
-        }
-        function cbtn:onTap() kd:closeDock() return true end
-        table.insert(v, cbtn)
-    else
-        table.insert(v, Button:new{
-            text = _("Close"),
-            width = math.floor(sw * 0.4),
-            height = btn_h,
-            text_font_face = "cfont",
-            text_font_size = 20,
-            callback = function() self:closeDock() end,
-        })
-    end
+    -- bottom row: lock, theme, close
+    table.insert(v, vspan(math.floor(sh * 0.012)))
+    table.insert(v, HorizontalGroup:new{ align = "center",
+        bigbtn(_("Lock"), function() self:setLocked(true) end, true),
+        hspan(math.floor(pad / 2)),
+        bigbtn(_("Theme") .. ": " .. THEME_LABELS[self:theme()], function() self:cycleTheme() end, true),
+        hspan(math.floor(pad / 2)),
+        bigbtn(_("Close"), function() self:closeDock() end, true),
+    })
 
     return v
 end
 
 function KindleDock:refreshScreen(refresh)
     if not self.root then return end
+    local dark = self:isDark()
+    if dark ~= self.painted_dark then refresh = "full" end  -- theme flip needs a full e-ink refresh
+    self.painted_dark = dark
+    self.root[1].background = dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
     self.root[1][1] = self:buildContent()
     UIManager:setDirty(self.root, refresh or "ui")
 end
@@ -559,6 +585,8 @@ function KindleDock:openDock()
     self.last_track_id = nil
     self.have_art = false
     self.art_path = nil
+    self.locked = false
+    self.painted_dark = self:isDark()
     local sw, sh = Screen:getWidth(), Screen:getHeight()
     self.root = InputContainer:new{
         dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh },
@@ -572,6 +600,14 @@ function KindleDock:openDock()
             self:buildContent(),
         },
     }
+    local kd = self
+    self.root.ges_events = {
+        Hold = { GestureRange:new{ ges = "hold", range = self.root.dimen } },
+    }
+    function self.root:onHold()
+        if kd.locked then kd:setLocked(false) end
+        return true
+    end
     UIManager:show(self.root)
     pcall(function() self:poll(true) end)
     self:scheduleNext()

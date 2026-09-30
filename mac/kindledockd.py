@@ -148,6 +148,12 @@ def nowplaying():
     track_id = ("%x" % (uid & 0xFFFFFFFFFFFF)) if isinstance(uid, int) else None
     if not track_id and j.get("title"):
         track_id = hashlib.md5(((j.get("title") or "") + "|" + (j.get("artist") or "")).encode()).hexdigest()[:12]
+    # position in the play queue, or in the album when the app reports no queue
+    queue = None
+    if (j.get("totalQueueCount") or 0) > 1 and j.get("queueIndex") is not None:
+        queue = [j["queueIndex"] + 1, j["totalQueueCount"]]
+    elif (j.get("totalTrackCount") or 0) > 1 and j.get("trackNumber"):
+        queue = [j["trackNumber"], j["totalTrackCount"]]
     return {
         "state": "playing" if j.get("playing") else ("paused" if j.get("title") else "idle"),
         "track": j.get("title"), "artist": j.get("artist"), "album": j.get("album"),
@@ -155,7 +161,7 @@ def nowplaying():
         "app": j.get("bundleIdentifier"), "media_type": j.get("mediaType"),
         "volume": get_volume(), "output": current_output(),
         "has_artwork": bool(j.get("artworkData")) or (j.get("bundleIdentifier") in BROWSERS),
-        "track_id": track_id, "server_time": round(time.time(), 1),
+        "track_id": track_id, "queue": queue, "server_time": round(time.time(), 1),
     }
 
 
