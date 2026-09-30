@@ -7,9 +7,9 @@ renders a clean e-ink screen: cover art, track info, progress, and controls
 system-wide (Music, browser video, ...), not just one app.
 ]]
 
-local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local Button = require("ui/widget/button")
+local ButtonDialog = require("ui/widget/buttondialog")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local DataStorage = require("datastorage")
 local Device = require("device")
@@ -21,9 +21,8 @@ local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local ImageWidget = require("ui/widget/imagewidget")
-local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
+local logger = require("logger")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local ProgressWidget = require("ui/widget/progresswidget")
 local TextWidget = require("ui/widget/textwidget")
@@ -36,6 +35,7 @@ local Screen = Device.screen
 local Size = require("ui/size")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
+local url = require("socket.url")
 local json = require("json")
 local _ = require("gettext")
 
@@ -194,6 +194,30 @@ function KindleDock:fetchArtwork(track_id)
     return true
 end
 
+function KindleDock:showOutputs()
+    local raw, code = self:request("GET", "/outputs")
+    local ok, res = pcall(json.decode, raw or "")
+    if code ~= 200 or not ok or type(res) ~= "table" or type(res.outputs) ~= "table" then return end
+    local buttons = {}
+    for _, o in ipairs(res.outputs) do
+        table.insert(buttons, {{
+            text = o.current and (o.name .. "  (current)") or o.name,
+            enabled = not o.current,
+            callback = function()
+                UIManager:close(self.output_dialog)
+                self:sendCommand("c=set_output&uid=" .. url.escape(o.uid))
+            end,
+        }})
+    end
+    self.output_dialog = ButtonDialog:new{ title = _("Play sound on"), buttons = buttons }
+    UIManager:show(self.output_dialog)
+end
+
+-- cmd is a /cmd query string, or a function for buttons that open a dialog instead
+function KindleDock:runCommand(cmd)
+    if type(cmd) == "function" then cmd() else self:sendCommand(cmd) end
+end
+
 function KindleDock:sendCommand(params)
     self:request("POST", "/cmd?" .. params)
     -- immediate repaint so the button press feels responsive
@@ -286,13 +310,23 @@ function KindleDock:buildContent()
                 },
             },
         })
-    else
+    elseif playing or self.offline then
         table.insert(v, CenterContainer:new{
             dimen = Geom:new{ w = sw, h = cover_h },
             TextWidget:new{
-                text = playing and "" or (self.offline and _("Mac unreachable") or _("Nothing playing")),
+                text = playing and "" or _("Mac unreachable"),
                 face = Font:getFace("cfont", 26),
                 fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            },
+        })
+    else
+        -- idle dock: a clock instead of an empty frame
+        table.insert(v, CenterContainer:new{
+            dimen = Geom:new{ w = sw, h = cover_h },
+            TextWidget:new{
+                text = (os.date("%I:%M"):gsub("^0", "")),
+                face = Font:getFace("cfont", 110),
+                fgcolor = C_HI,
             },
         })
     end
@@ -338,13 +372,33 @@ function KindleDock:buildContent()
     if playing and (state.duration or 0) > 0 then
         table.insert(v, vspan(math.floor(sh * 0.014)))
         local pct = math.min(1, (state.position or 0) / state.duration)
-        table.insert(v, ProgressWidget:new{
-            width = sw - 2 * pad,
-            height = math.floor(sh * 0.012),
-            percentage = pct,
-            fillcolor = C_FILL,
-            bgcolor = C_TRK,
-        })
+        -- tap anywhere along the bar to seek; the hit area is taller than the bar
+        local bar_w, bar_h = sw - 2 * pad, math.floor(sh * 0.012)
+        local kd, dur = self, state.duration
+        local bar = InputContainer:new{
+            dimen = Geom:new{ w = bar_w, h = bar_h * 5 },
+            CenterContainer:new{
+                dimen = Geom:new{ w = bar_w, h = bar_h * 5 },
+                ProgressWidget:new{
+                    width = bar_w,
+                    height = bar_h,
+                    percentage = pct,
+                    fillcolor = C_FILL,
+                    bgcolor = C_TRK,
+                },
+            },
+        }
+        bar.ges_events = {
+            Tap = { GestureRange:new{ ges = "tap", range = function() return bar.dimen end } },
+        }
+        function bar:onTap(_, ges)
+            local frac = math.max(0, math.min(1, (ges.pos.x - self.dimen.x) / self.dimen.w))
+            kd:sendCommand(string.format("c=seek&to=%.1f", frac * dur))
+            return true
+        end
+        table.insert(v, vspan(-bar_h * 2))
+        table.insert(v, bar)
+        table.insert(v, vspan(-bar_h * 2))
         table.insert(v, vspan(8))
         table.insert(v, TextWidget:new{
             text = fmt_time(state.position) .. "  /  " .. fmt_time(state.duration),
@@ -375,7 +429,8 @@ function KindleDock:buildContent()
             Tap = { GestureRange:new{ ges = "tap", range = function() return btn.dimen end } },
         }
         function btn:onTap()
-            if enabled ~= false then kd:sendCommand(cmd) end
+            if enabled == false then return true end
+            kd:runCommand(cmd)
             return true
         end
         return btn
@@ -389,7 +444,7 @@ function KindleDock:buildContent()
             text_font_face = "cfont",
             text_font_size = 22,
             enabled = enabled ~= false,
-            callback = function() self:sendCommand(cmd) end,
+            callback = function() self:runCommand(cmd) end,
         }
     end
     local function smallbtn(label, cmd, enabled)
@@ -401,7 +456,7 @@ function KindleDock:buildContent()
             text_font_face = "cfont",
             text_font_size = 18,
             enabled = enabled ~= false,
-            callback = function() self:sendCommand(cmd) end,
+            callback = function() self:runCommand(cmd) end,
         }
     end
     table.insert(v, vspan(math.floor(sh * 0.02)))
@@ -423,13 +478,15 @@ function KindleDock:buildContent()
         hspan(math.floor(pad / 3)),
         smallbtn("+15s", "c=fwd15", playing),
     })
-    if vol then
+    -- sound output + volume: tap to pick where the Mac plays (speakers, headphones, ...)
+    local out = state and state.output ~= "" and state.output
+    if vol or out then
+        local label = (out and out .. (vol and "  ·  " or "") or "")
+            .. (vol and _("Volume") .. " " .. tostring(vol) or "") .. (out and "  ›" or "")
         table.insert(v, vspan(8))
-        table.insert(v, TextWidget:new{
-            text = _("Volume") .. " " .. tostring(vol),
-            face = Font:getFace("cfont", 16),
-            fgcolor = Blitbuffer.COLOR_GRAY,
-        })
+        table.insert(v, tbtn(label,
+            function() self:showOutputs() end, out and true or false,
+            sw - 2 * pad, math.floor(sh * 0.04), 17))
     end
 
     -- close

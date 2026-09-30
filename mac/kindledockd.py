@@ -12,10 +12,13 @@ Endpoints:
   GET  /artwork.png?track=<id>      auth - PNG artwork (cached, resized)
   POST /cmd?c=toggle|play|pause|next|prev|back15|fwd15
   POST /cmd?c=set_volume&v=0-100 | volume_up | volume_down
+  GET  /outputs                     auth - {"outputs": [{"uid", "name", "current"}]}
+  POST /cmd?c=set_output&uid=<uid> switch the Mac's sound output
 
 Config: ~/.config/kindledock/config.json {"port": 8931, "token": "<auto>"}
 """
-import json, os, subprocess, hashlib, threading, time, secrets, base64, re
+import json, os, subprocess, hashlib, threading, time, secrets, base64, re, struct
+import ctypes, ctypes.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import urllib.request
@@ -66,14 +69,69 @@ def get_volume():
     try: return int(out)
     except ValueError: return None
 
+# Audio output devices, via CoreAudio through ctypes (stdlib only).
+# AirPlay targets (TVs, HomePods) are not CoreAudio devices and do not appear.
+_CA = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreAudio"))
+_CF = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+_CF.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+_CF.CFRelease.argtypes = [ctypes.c_void_p]
+
+class _Addr(ctypes.Structure):
+    _fields_ = [("sel", ctypes.c_uint32), ("scope", ctypes.c_uint32), ("elem", ctypes.c_uint32)]
+
+def _fcc(s): return struct.unpack(">I", s.encode())[0]
+_SYSTEM, _GLOBAL, _OUTPUT = 1, _fcc("glob"), _fcc("outp")
+
+def _prop(obj, sel, scope=_GLOBAL):
+    a = _Addr(_fcc(sel), scope, 0); n = ctypes.c_uint32(0)
+    if _CA.AudioObjectGetPropertyDataSize(obj, ctypes.byref(a), 0, None, ctypes.byref(n)): return None
+    buf = ctypes.create_string_buffer(n.value)
+    if _CA.AudioObjectGetPropertyData(obj, ctypes.byref(a), 0, None, ctypes.byref(n), buf): return None
+    return buf.raw[:n.value]
+
+def _prop_str(obj, sel):
+    raw = _prop(obj, sel)
+    if not raw: return ""
+    ref = ctypes.c_void_p(struct.unpack("P", raw)[0])
+    b = ctypes.create_string_buffer(512)
+    _CF.CFStringGetCString(ref, b, 512, 0x08000100)  # kCFStringEncodingUTF8
+    _CF.CFRelease(ref)
+    return b.value.decode()
+
+def _devices():
+    raw = _prop(_SYSTEM, "dev#") or b""
+    return [d for d in struct.unpack("%dI" % (len(raw) // 4), raw) if _prop(d, "stm#", _OUTPUT)]
+
+def _default_output():
+    return struct.unpack("I", _prop(_SYSTEM, "dOut"))[0]
+
+def list_outputs():
+    cur = _default_output()
+    return [{"uid": _prop_str(d, "uid "), "name": _prop_str(d, "lnam"), "current": d == cur}
+            for d in _devices()]
+
+def current_output():
+    return _prop_str(_default_output(), "lnam")
+
+def set_output(uid):
+    for d in _devices():
+        if _prop_str(d, "uid ") != uid: continue
+        val = ctypes.c_uint32(d)
+        for sel in ("dOut", "sOut"):  # default output, and system sounds, like the Sound menu
+            a = _Addr(_fcc(sel), _GLOBAL, 0)
+            err = _CA.AudioObjectSetPropertyData(_SYSTEM, ctypes.byref(a), 0, None, 4, ctypes.byref(val))
+            if err: return False, "coreaudio error %d" % err
+        return True, ""
+    return False, "no such output"
+
 def nowplaying():
     rc, out, err = mc("get")
-    if rc != 0 or not out:
-        return {"state": "idle", "volume": get_volume(), "server_time": time.time()}
     try:
-        j = json.loads(out)
+        j = json.loads(out) if rc == 0 and out else None
     except json.JSONDecodeError:
-        return {"state": "idle", "volume": get_volume(), "server_time": time.time()}
+        j = None
+    if not j:
+        return {"state": "idle", "volume": get_volume(), "output": current_output(), "server_time": time.time()}
     pos = j.get("elapsedTime") or 0.0
     rate = j.get("playbackRate") or 0.0
     if j.get("playing") and rate and j.get("timestamp"):
@@ -95,7 +153,7 @@ def nowplaying():
         "track": j.get("title"), "artist": j.get("artist"), "album": j.get("album"),
         "duration": round(dur, 1), "position": round(pos, 1),
         "app": j.get("bundleIdentifier"), "media_type": j.get("mediaType"),
-        "volume": get_volume(),
+        "volume": get_volume(), "output": current_output(),
         "has_artwork": bool(j.get("artworkData")) or (j.get("bundleIdentifier") in BROWSERS),
         "track_id": track_id, "server_time": round(time.time(), 1),
     }
@@ -228,6 +286,9 @@ def run_command(qs):
         v = max(0, min(100, cur + (5 if c == "volume_up" else -5)))
         rc, _, err = osa(f"set volume output volume {v}")
         return {"ok": rc == 0, "err": err[:200] if rc else "", "volume": v}
+    if c == "set_output":
+        ok, err = set_output(qs.get("uid", [""])[0])
+        return {"ok": ok, "err": err}
     return {"ok": False, "err": "unknown command"}
 
 class H(BaseHTTPRequestHandler):
@@ -254,6 +315,8 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": False, "err": "auth"}, 403)
         if u.path == "/nowplaying":
             return self._json(nowplaying())
+        if u.path == "/outputs":
+            return self._json({"outputs": list_outputs()})
         if u.path == "/artwork.png":
             tid = parse_qs(u.query).get("track", [""])[0]
             data = artwork_png(tid)

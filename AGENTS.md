@@ -15,7 +15,7 @@ This file is written for a coding agent. Follow it top to bottom and you will ha
 3. For browser seek support (YouTube ±15s): in Chrome, enable View > Developer > Allow JavaScript from Apple Events. Approve the Automation permission the first time the daemon drives Chrome.
 4. Install the launchd agent: copy `install/com.kindledock.daemon.plist` to `~/Library/LaunchAgents/`, edit the paths inside to match where you put the script and log, then `launchctl load ~/Library/LaunchAgents/com.kindledock.daemon.plist`.
 5. First run creates `~/.config/kindledock/config.json` with `{"port": 8931, "token": "<random>"}`.
-6. Verify: `curl -s -H "Authorization: Bearer <token>" http://localhost:8931/nowplaying` returns JSON while something plays. `curl -s -X POST -H "Authorization: Bearer <token>" http://localhost:8931/cmd -d '{"cmd":"playpause"}'` toggles playback.
+6. Verify: `curl -s -H "Authorization: Bearer <token>" http://localhost:8931/nowplaying` returns JSON while something plays. `curl -s -X POST -H "Authorization: Bearer <token>" "http://localhost:8931/cmd?c=toggle"` toggles playback. `curl -s -H "Authorization: Bearer <token>" http://localhost:8931/outputs` lists sound outputs with the current one marked.
 
 ## Step 2 - Kindle plugin
 
