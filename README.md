@@ -2,7 +2,7 @@
 
 Turn a jailbroken Kindle into an always-on now-playing display and remote control for the music playing on your Mac.
 
-![kindledock on a Kindle](docs/screenshot.png)
+<img src="docs/screenshot-small.png" alt="kindledock on a Kindle" width="320">
 
 ## What it does
 
