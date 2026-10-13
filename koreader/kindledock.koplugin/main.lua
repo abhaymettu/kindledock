@@ -52,112 +52,7 @@ function KindleDock:onKindleDockOpen()
     return true
 end
 
--- Bookshelf broadcasts to the active FileManager/Reader plugin.
--- Reuse OPDS settings in memory; never copy credentials into kindledock.
-function KindleDock:onKindleDockSync()
-    if self.sync_busy then return true end
-    local InfoMessage = require("ui/widget/infomessage")
-    local function notice(message)
-        UIManager:show(InfoMessage:new{ text = message, timeout = 4 })
-    end
-    local function plugin(name)
-        if self.ui[name] then return self.ui[name] end
-        for _, module in ipairs(self.ui) do
-            if module.name == name then return module end
-        end
-    end
-    local opds = plugin("opds")
-    if not opds then
-        notice(_("Enable the OPDS plugin to refresh your catalog."))
-        return true
-    end
-    opds:loadSettings()
-    local title = self.settings:readSetting("sync_catalog_title") or "Atlas Books"
-    local server
-    for _, candidate in ipairs(opds.servers or {}) do
-        if candidate.title == title then server = candidate; break end
-    end
-    if not server or not server.url or server.url:find("%s", 1, true) then
-        notice(_("Sync catalog not found. Configure it in OPDS first."))
-        return true
-    end
-    self.sync_busy = true
-    require("ui/network/manager"):runWhenConnected(function()
-        local ok, err = pcall(function()
-            local kosync = plugin("kosync")
-            if self.ui.document then
-                if kosync then
-                    -- Native interactive handler owns login/error/success feedback.
-                    kosync:onKOSyncPushProgress()
-                else
-                    notice(_("Progress sync is disabled. Refreshing catalog only."))
-                end
-            else
-                notice(_("Refreshing catalog. Open a book to push its progress."))
-            end
-            if opds.opds_browser then opds.opds_browser.close_callback() end
-            opds:onShowOPDSCatalog()
-            local browser = opds.opds_browser
-            -- Bypass the Last-Modified body cache for this instance only.
-            -- Native fetch/parsing/authentication/error handling stays intact.
-            local fetch = browser.fetchFeed
-            browser.fetchFeed = function(b, item_url, headers_only)
-                if headers_only then return nil end
-                return fetch(b, item_url, false)
-            end
-            for _, item in ipairs(browser.item_table) do
-                if item.text == server.title and item.url == server.url then
-                    browser:onMenuSelect(item)
-                    return
-                end
-            end
-            notice(_("Could not open the configured sync catalog."))
-        end)
-        self.sync_busy = false
-        if not ok then
-            logger.warn("kindledock: sync action failed:", err)
-            notice(_("Sync could not finish. Check your connection and try again."))
-        end
-    end)
-    -- Wi-Fi approval can be canceled; never leave the action locked forever.
-    UIManager:scheduleIn(15, function() self.sync_busy = false end)
-    return true
-end
-
--- One-time opt-in installer. Model APIs preserve the existing menu and
--- settings are flushed by Bookshelf itself, not edited under a running reader.
-function KindleDock:installSyncMenu()
-    local marker = DataStorage:getSettingsDir() .. "/kindledock-sync-menu.once"
-    local f = io.open(marker, "r")
-    if not f then return end
-    f:close()
-    local ok, err = pcall(function()
-        local Model = require("lib/bookshelf_start_menu_model")
-        local items = Model.load()
-        local found = false
-        for _, item in ipairs(items) do
-            if item.module == "kindledock_sync_now" then found = true end
-        end
-        if not found then
-            local anchor
-            for _, item in ipairs(items) do
-                if item.module == "kindledock_now_playing" then anchor = item.id; break end
-            end
-            local entry = { id = "sm_kindledock_sync_now", type = "module",
-                            module = "kindledock_sync_now", scope = "both" }
-            if anchor then Model.insertAfter(items, anchor, entry)
-            else table.insert(items, 1, entry) end
-            Model.save(items)
-        end
-        os.remove(marker)
-    end)
-    if not ok then logger.warn("kindledock: sync menu install failed:", err) end
-end
-
 function KindleDock:onDispatcherRegisterActions()
-    Dispatcher:registerAction("kindledock_sync", {
-        category = "none", event = "KindleDockSync", title = _("Sync now"), device = true,
-    })
     Dispatcher:registerAction("kindledock_open", {
         category = "none",
         event = "KindleDockOpen",
@@ -192,7 +87,6 @@ end
 function KindleDock:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/kindledock.lua")
     self.ui.menu:registerToMainMenu(self)
-    UIManager:scheduleIn(2, function() self:installSyncMenu() end)
     -- test hook: auto-open the dock screen (used by the emulator test harness)
     if self.settings:readSetting("autotest_open") then
         UIManager:scheduleIn(2, function() self:openDock() end)
